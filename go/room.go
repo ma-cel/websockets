@@ -53,6 +53,10 @@ func (room *Room) GetName() string {
 	return room.Name
 }
 
+func (room *Room) GetPrivate() bool {
+	return room.Private
+}
+
 func (room *Room) registerClientInRoom(client *Client) {
 	if !room.Private {
 		room.notifyClientJoined(client)

@@ -1,21 +1,35 @@
 package main
 
+import (
+	"github.com/google/uuid"
+	"websockets/models"
+)
+
 type WsServer struct {
-	clients    map[*Client]bool
-	register   chan *Client
-	unregister chan *Client
-	broadcast  chan []byte
-	rooms      map[*Room]bool
+	clients        map[*Client]bool
+	register       chan *Client
+	unregister     chan *Client
+	broadcast      chan []byte
+	rooms          map[*Room]bool
+	users          []models.User
+	roomRepository models.RoomRepository
+	userRepository models.UserRepository
 }
 
-func NewWebsocketServer() *WsServer {
-	return &WsServer{
-		clients:    make(map[*Client]bool),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		broadcast:  make(chan []byte),
-		rooms:      make(map[*Room]bool),
+func NewWebsocketServer(roomRepository models.RoomRepository, userRepository models.UserRepository) *WsServer {
+	wsServer := &WsServer{
+		clients:        make(map[*Client]bool),
+		register:       make(chan *Client),
+		unregister:     make(chan *Client),
+		broadcast:      make(chan []byte),
+		rooms:          make(map[*Room]bool),
+		roomRepository: roomRepository,
+		userRepository: userRepository,
 	}
+
+	wsServer.users = userRepository.GetAllUsers()
+
+	return wsServer
 }
 
 func (server *WsServer) Run() {
@@ -40,9 +54,12 @@ func (server *WsServer) broadcastToClients(message []byte) {
 }
 
 func (server *WsServer) registerClient(client *Client) {
+	server.userRepository.AddUser(client)
 	server.notifyClientJoined(client)
 	server.listOnlineClients(client)
 	server.clients[client] = true
+
+	server.users = append(server.users, message.Sender)
 }
 
 func (server *WsServer) unregisterClient(client *Client) {
@@ -50,6 +67,15 @@ func (server *WsServer) unregisterClient(client *Client) {
 		delete(server.clients, client)
 		server.notifyClientLeft(client)
 	}
+
+	for i, user := range server.users {
+		if user.GetId() == message.Sender.GetId() {
+			server.users[i] = server.users[len(server.users)-1]
+			server.users = server.users[:len(server.users)-1]
+		}
+	}
+
+	server.userRepository.RemoveUser(client)
 }
 
 func (server *WsServer) findRoomByName(name string) *Room {
@@ -61,15 +87,57 @@ func (server *WsServer) findRoomByName(name string) *Room {
 		}
 	}
 
+	if foundRoom == nil {
+		foundRoom = server.runRoomFromRepository(name)
+	}
+
 	return foundRoom
 }
 
-func (server *WsServer) createRoom(name string) *Room {
-	room := NewRoom(name)
+func (server *WsServer) findRoomById(ID string) *Room {
+	var foundRoom *Room
+	for room := range server.rooms {
+		if room.GetId() == ID {
+			foundRoom = room
+			break
+		}
+	}
+
+	return foundRoom
+}
+
+func (server *WsServer) runRoomFromRepository(name string) *Room {
+	var room *Room
+	dbRoom := server.roomRepository.FindRoomByName(name)
+	if dbRoom != nil {
+		room = NewRoom(dbRoom.GetName(), dbRoom.GetPrivate())
+		room.ID, _ = uuid.Parse(dbRoom.GetId())
+
+		go room.RunRoom()
+		server.rooms[room] = true
+	}
+	return room
+}
+
+func (server *WsServer) createRoom(name string, private bool) *Room {
+	room := NewRoom(name, private)
+	server.roomRepository.AddRoom(room)
+
 	go room.RunRoom()
 	server.rooms[room] = true
 
 	return room
+}
+
+func (server *WsServer) findClientByID(ID string) *Client {
+	var foundClient *Client
+	for client := range server.clients {
+		if client.ID.String() == ID {
+			foundClient = client
+			break
+		}
+	}
+	return foundClient
 }
 
 func (server *WsServer) notifyClientJoined(client *Client) {
@@ -91,10 +159,10 @@ func (server *WsServer) notifyClientLeft(client *Client) {
 }
 
 func (server *WsServer) listOnlineClients(client *Client) {
-	for existingClient := range server.clients {
+	for _, user := range server.users {
 		message := &Message{
 			Action: UserJoinedAction,
-			Sender: existingClient,
+			Sender: user,
 		}
 		client.send <- message.encode()
 	}
