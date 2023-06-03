@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"time"
+	"websockets/config"
 	"websockets/models"
 )
 
@@ -221,14 +222,14 @@ func (client *Client) handleJoinPrivateMessage(message Message) {
 	target.joinRoom(roomName, client)
 }
 
-func (client *Client) joinRoom(roomName string, sender models.User) {
+func (client *Client) joinRoom(roomName string, sender models.User) *Room {
 	room := client.WsServer.findRoomByName(roomName)
 	if room == nil {
 		room = client.WsServer.createRoom(roomName, sender != nil)
 	}
 
 	if sender == nil && room.Private {
-		return
+		return nil
 	}
 
 	if !client.isInRoom(room) {
@@ -236,7 +237,7 @@ func (client *Client) joinRoom(roomName string, sender models.User) {
 		room.register <- client
 		client.notifyRoomJoined(room, sender)
 	}
-
+	return room
 }
 
 func (client *Client) isInRoom(room *Room) bool {
@@ -258,4 +259,32 @@ func (client *Client) notifyRoomJoined(room *Room, sender models.User) {
 
 func (client *Client) GetId() string {
 	return client.ID.String()
+}
+
+func (client *Client) handleJoinRoomPrivateMessage(message Message) {
+	target := client.WsServer.findUserByID(message.Sender.GetId())
+	if target == nil {
+		return
+	}
+
+	roomName := message.Message + client.ID.String()
+
+	joinedRoom := client.joinRoom(roomName, target)
+
+	if joinedRoom != nil {
+		client.inviteTargetUser(target, joinedRoom)
+	}
+}
+
+func (client *Client) inviteTargetUser(target models.User, room *Room) {
+	inviteMessage := &Message{
+		Action:  JoinRoomPrivateAction,
+		Message: target.GetId(),
+		Target:  room,
+		Sender:  client,
+	}
+
+	if err := config.Redis.Publish(ctx, PubSubGeneralChannel, inviteMessage.encode()).Err(); err != nil {
+		log.Println(err)
+	}
 }

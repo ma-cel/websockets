@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"github.com/google/uuid"
+	"log"
+	"websockets/config"
 )
+
+var ctx = context.Background()
 
 type Room struct {
 	ID         uuid.UUID `json:"id"`
@@ -35,6 +40,8 @@ func (room *Room) GetId() string {
 }
 
 func (room *Room) RunRoom() {
+	go room.subscribeToRoomMessages()
+
 	for {
 		select {
 		case client := <-room.register:
@@ -44,7 +51,7 @@ func (room *Room) RunRoom() {
 			room.unregisterClientInRoom(client)
 
 		case message := <-room.broadcast:
-			room.broadcastToClientsInRoom(message.encode())
+			room.publishRoomMessage(message.encode())
 		}
 	}
 }
@@ -83,6 +90,7 @@ func (room *Room) notifyClientJoined(client *Client) {
 	}
 
 	room.broadcastToClientsInRoom(message.encode())
+	room.publishRoomMessage(message.encode())
 }
 
 func (room *Room) notifyClientLeft(client *Client) {
@@ -93,4 +101,22 @@ func (room *Room) notifyClientLeft(client *Client) {
 	}
 
 	room.broadcastToClientsInRoom(message.encode())
+}
+
+func (room *Room) publishRoomMessage(message []byte) {
+	err := config.Redis.Publish(ctx, room.GetName(), message).Err()
+
+	if err != nil {
+		log.Println(err)
+	}
+}
+
+func (room *Room) subscribeToRoomMessages() {
+	pubsub := config.Redis.Subscribe(ctx, room.GetName())
+
+	ch := pubsub.Channel()
+
+	for msg := range ch {
+		room.broadcastToClientsInRoom([]byte(msg.Payload))
+	}
 }

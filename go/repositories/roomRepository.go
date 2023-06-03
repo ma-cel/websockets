@@ -15,6 +15,13 @@ func (room *Room) GetId() string {
 	return room.Id
 }
 
+func (repo *RoomRepository) AddRoom(room models.Room) {
+	stmt, err := repo.Db.Prepare("INSERT INTO room(id, name) values (?,?)")
+	checkErr(err)
+	_, err = stmt.Exec(room.GetId(), room.GetName())
+	checkErr(err)
+}
+
 func (room *Room) GetName() string {
 	return room.Name
 }

@@ -1,9 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"github.com/google/uuid"
+	"log"
+	"websockets/config"
 	"websockets/models"
 )
+
+const PubSubGeneralChannel = "general"
 
 type WsServer struct {
 	clients        map[*Client]bool
@@ -33,6 +38,7 @@ func NewWebsocketServer(roomRepository models.RoomRepository, userRepository mod
 }
 
 func (server *WsServer) Run() {
+	go server.listenPuSubChannel()
 	for {
 		select {
 		case client := <-server.register:
@@ -55,27 +61,17 @@ func (server *WsServer) broadcastToClients(message []byte) {
 
 func (server *WsServer) registerClient(client *Client) {
 	server.userRepository.AddUser(client)
-	server.notifyClientJoined(client)
+	server.publishClientJoined(client)
 	server.listOnlineClients(client)
 	server.clients[client] = true
-
-	server.users = append(server.users, message.Sender)
 }
 
 func (server *WsServer) unregisterClient(client *Client) {
 	if _, ok := server.clients[client]; ok {
 		delete(server.clients, client)
-		server.notifyClientLeft(client)
+		server.userRepository.RemoveUser(client)
+		server.publishClientLeft(client)
 	}
-
-	for i, user := range server.users {
-		if user.GetId() == message.Sender.GetId() {
-			server.users[i] = server.users[len(server.users)-1]
-			server.users = server.users[:len(server.users)-1]
-		}
-	}
-
-	server.userRepository.RemoveUser(client)
 }
 
 func (server *WsServer) findRoomByName(name string) *Room {
@@ -166,4 +162,85 @@ func (server *WsServer) listOnlineClients(client *Client) {
 		}
 		client.send <- message.encode()
 	}
+}
+
+func (server *WsServer) publishClientJoined(client *Client) {
+
+	message := &Message{
+		Action: UserJoinedAction,
+		Sender: client,
+	}
+
+	if err := config.Redis.Publish(ctx, PubSubGeneralChannel, message.encode()).Err(); err != nil {
+		log.Println(err)
+	}
+
+}
+
+func (server *WsServer) publishClientLeft(client *Client) {
+	message := Message{
+		Action: UserLeftAction,
+		Sender: client,
+	}
+
+	if err := config.Redis.Publish(ctx, PubSubGeneralChannel, message.encode()).Err(); err != nil {
+		log.Println(err)
+	}
+}
+
+func (server *WsServer) listenPuSubChannel() {
+	pubSub := config.Redis.Subscribe(ctx, PubSubGeneralChannel)
+	ch := pubSub.Channel()
+
+	for msg := range ch {
+		var message Message
+		if err := json.Unmarshal([]byte(msg.Payload), &message); err != nil {
+			log.Printf("Error on unmarshal JSON message %s", err)
+			return
+		}
+
+		switch message.Action {
+		case UserJoinedAction:
+			server.handleUserJoined(message)
+		case UserLeftAction:
+			server.handleUserLeft(message)
+		case JoinRoomPrivateAction:
+			server.handleUserJoinedPrivate(message)
+		}
+	}
+}
+
+func (server *WsServer) handleUserJoined(message Message) {
+	server.users = append(server.users, message.Sender)
+	server.broadcastToClients(message.encode())
+}
+
+func (server *WsServer) handleUserLeft(message Message) {
+
+	for i, user := range server.users {
+		if user.GetId() == message.Sender.GetId() {
+			server.users[i] = server.users[len(server.users)-1]
+			server.users = server.users[:len(server.users)-1]
+		}
+	}
+	server.broadcastToClients(message.encode())
+}
+
+func (server *WsServer) handleUserJoinedPrivate(message Message) {
+	targetClient := server.findClientByID(message.Sender.GetId())
+	if targetClient != nil {
+		targetClient.joinRoom(message.Target.GetName(), message.Sender)
+	}
+}
+
+func (server *WsServer) findUserByID(ID string) models.User {
+	var foundUser models.User
+
+	for _, client := range server.users {
+		if client.GetId() == ID {
+			foundUser = client
+			break
+		}
+	}
+	return foundUser
 }
